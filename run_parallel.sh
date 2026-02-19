@@ -34,6 +34,11 @@ export NS3_DIR="$NS3_ROOT"
 cd "$WORK_DIR"
 mkdir -p "$RESULTS" "$TMP"
 
+# Log everything to file
+LOGFILE="$RESULTS/run_$(date '+%Y%m%d_%H%M%S').log"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "Log file: $LOGFILE"
+
 # Verify run_single.py exists
 if [ ! -f "$WORK_DIR/experiments/run_single.py" ]; then
     echo "ERROR: experiments/run_single.py not found in ns-3 tree."
