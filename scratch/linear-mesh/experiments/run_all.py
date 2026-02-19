@@ -27,8 +27,6 @@ import time
 import json
 import subprocess
 import traceback
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -204,6 +202,90 @@ def summarize_episode(data):
 
 
 # ===================================================================
+# Parallel launcher: run run_single.py as separate OS processes
+# ===================================================================
+
+def _run_parallel_singles(mode, station_counts, sim_time, max_workers,
+                          episode_count=None):
+    """Launch multiple run_single.py processes in parallel.
+
+    Returns dict of {n_wifi: parsed_json_result}.
+    """
+    python = sys.executable
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmp_dir = os.path.join(RESULTS_DIR, "_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Prepare jobs: (n_wifi, port, output_file, cmd)
+    jobs = []
+    for n_wifi in station_counts:
+        port = _next_port()
+        out_file = os.path.join(tmp_dir, f"{mode}_{n_wifi}.json")
+
+        if mode == "ddpg":
+            # DDPG needs port_base with enough room for episodes
+            # Reserve ports: port_base .. port_base + episode_count
+            for _ in range(episode_count - 1):
+                _next_port()
+            cmd = [python, "-u", "-m", "experiments.run_single",
+                   mode, str(n_wifi), str(port), str(sim_time),
+                   str(episode_count), out_file]
+        else:
+            cmd = [python, "-u", "-m", "experiments.run_single",
+                   mode, str(n_wifi), str(port), str(sim_time), out_file]
+
+        jobs.append((n_wifi, cmd, out_file))
+
+    # Launch up to max_workers at a time
+    results = {}
+    active = []  # (n_wifi, proc, out_file)
+    pending = list(jobs)
+
+    while pending or active:
+        # Fill up worker slots
+        while pending and len(active) < max_workers:
+            n_wifi, cmd, out_file = pending.pop(0)
+            proc = subprocess.Popen(
+                cmd, cwd=base_dir,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            active.append((n_wifi, proc, out_file))
+
+        # Check for completed processes
+        still_active = []
+        for n_wifi, proc, out_file in active:
+            ret = proc.poll()
+            if ret is not None:
+                # Process finished
+                stdout = proc.stdout.read().decode("utf-8", errors="replace")
+                if stdout.strip():
+                    _print(stdout.strip())
+                if ret == 0 and os.path.exists(out_file):
+                    with open(out_file) as f:
+                        results[n_wifi] = json.load(f)
+                else:
+                    _print(f"  WARNING: {mode} n={n_wifi} exited with code {ret}")
+                    results[n_wifi] = None
+            else:
+                still_active.append((n_wifi, proc, out_file))
+        active = still_active
+
+        if active:
+            time.sleep(1)
+
+    # Cleanup tmp files
+    for n_wifi, cmd, out_file in jobs:
+        if os.path.exists(out_file):
+            os.unlink(out_file)
+    try:
+        os.rmdir(tmp_dir)
+    except OSError:
+        pass
+
+    return results
+
+
+# ===================================================================
 # Experiment 1: BEB Baseline
 # ===================================================================
 
@@ -231,19 +313,13 @@ def run_beb_experiment(station_counts, sim_time, max_workers=1):
     fairness_results = {}
 
     if max_workers > 1:
-        _print(f"  Running {len(station_counts)} station counts in parallel "
-               f"(workers={min(max_workers, len(station_counts))})")
-        # Pre-assign ports
-        jobs = [(n, sim_time, _next_port()) for n in station_counts]
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(station_counts))) as pool:
-            futures = {pool.submit(_run_beb_single, n, st, p): n
-                       for n, st, p in jobs}
-            for future in as_completed(futures):
-                n_wifi, summary, n_samples = future.result()
-                throughput_results[n_wifi] = summary["throughput_mbps"]
-                fairness_results[n_wifi] = summary["fairness"]
-                _print(f"  nWifi={n_wifi} -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
-                       f"Fairness: {summary['fairness']:.4f} ({n_samples} samples)")
+        _print(f"  Launching {len(station_counts)} parallel BEB simulations "
+               f"(max {max_workers} at once)")
+        results = _run_parallel_singles("beb", station_counts, sim_time, max_workers)
+        for n_wifi, res in sorted(results.items()):
+            if res:
+                throughput_results[n_wifi] = res["throughput"]
+                fairness_results[n_wifi] = res["fairness"]
     else:
         for n_wifi in station_counts:
             port = _next_port()
@@ -285,25 +361,13 @@ def run_lookup_experiment(station_counts, sim_time, max_workers=1):
     fairness_results = {}
 
     if max_workers > 1:
-        _print(f"  Running {len(station_counts)} station counts in parallel "
-               f"(workers={min(max_workers, len(station_counts))})")
-        jobs = []
-        for n_wifi in station_counts:
-            target_cw = LOOKUP_TABLE.get(n_wifi, 63)
-            action_val = float(np.clip(np.log2(target_cw + 1) - 4, 0, 6))
-            port = _next_port()
-            jobs.append((n_wifi, sim_time, port, action_val, target_cw))
-
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(station_counts))) as pool:
-            futures = {pool.submit(_run_lookup_single, n, st, p, a, cw): n
-                       for n, st, p, a, cw in jobs}
-            for future in as_completed(futures):
-                n_wifi, summary, target_cw, action_val = future.result()
-                throughput_results[n_wifi] = summary["throughput_mbps"]
-                fairness_results[n_wifi] = summary["fairness"]
-                _print(f"  nWifi={n_wifi}, CW={target_cw} -> "
-                       f"Throughput: {summary['throughput_mbps']:.2f} Mbps, "
-                       f"Fairness: {summary['fairness']:.4f}")
+        _print(f"  Launching {len(station_counts)} parallel Lookup simulations "
+               f"(max {max_workers} at once)")
+        results = _run_parallel_singles("lookup", station_counts, sim_time, max_workers)
+        for n_wifi, res in sorted(results.items()):
+            if res:
+                throughput_results[n_wifi] = res["throughput"]
+                fairness_results[n_wifi] = res["fairness"]
     else:
         for n_wifi in station_counts:
             target_cw = LOOKUP_TABLE.get(n_wifi, 63)
@@ -324,7 +388,7 @@ def run_lookup_experiment(station_counts, sim_time, max_workers=1):
 # Experiment 3: DDPG Training (Static Topology)
 # ===================================================================
 
-def run_ddpg_static(station_counts, sim_time, episode_count):
+def run_ddpg_static(station_counts, sim_time, episode_count, max_workers=1):
     """Train DDPG agent on static topology for each station count.
 
     Returns:
@@ -337,100 +401,117 @@ def run_ddpg_static(station_counts, sim_time, episode_count):
     _print("EXPERIMENT: DDPG Training (Static Topology)")
     _print("=" * 70)
 
-    from agents.ddpg.agent import Agent, Config
-    from preprocessor import Preprocessor
-
-    steps_per_ep = int(sim_time / STEP_TIME) + HISTORY_LENGTH
-    preprocess = Preprocessor(False).preprocess
-
     results = {}
     cw_history = {}
     thr_history = {}
     fair_history = {}
 
-    for n_wifi in station_counts:
-        _print(f"\n  --- Training DDPG for {n_wifi} stations ---")
+    # Parallel: run different station counts as separate processes
+    # Each process trains its own agent independently
+    ddpg_workers = min(max_workers, len(station_counts)) if max_workers > 1 else 1
+    if ddpg_workers > 4:
+        # Limit DDPG parallelism to avoid GPU memory issues
+        ddpg_workers = 4
 
-        config = Config(
-            buffer_size=REPLAY_BUFFER_MULTIPLIER * steps_per_ep,
-            batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU,
-            lr_actor=LR_ACTOR, lr_critic=LR_CRITIC,
-            update_every=UPDATE_EVERY,
-        )
-        agent = Agent(
-            HISTORY_LENGTH, action_size=1, config=config,
-            actor_layers=ACTOR_LAYERS, critic_layers=CRITIC_LAYERS,
-        )
+    if ddpg_workers > 1:
+        _print(f"  Launching {len(station_counts)} DDPG trainings in parallel "
+               f"(max {ddpg_workers} at once)")
+        par_results = _run_parallel_singles(
+            "ddpg", station_counts, sim_time, ddpg_workers,
+            episode_count=episode_count)
+        for n_wifi, res in sorted(par_results.items()):
+            if res:
+                results[n_wifi] = res["final_throughput"]
+                thr_history[n_wifi] = res["thr_history"]
+                cw_history[n_wifi] = res["cw_history"]
+                fair_history[n_wifi] = res["fair_history"]
+    else:
+        from agents.ddpg.agent import Agent, Config
+        from preprocessor import Preprocessor
+        steps_per_ep = int(sim_time / STEP_TIME) + HISTORY_LENGTH
+        preprocess = Preprocessor(False).preprocess
 
-        round_throughputs = []
-        round_cws = []
-        round_fairnesses = []
+        for n_wifi in station_counts:
+            _print(f"\n  --- Training DDPG for {n_wifi} stations ---")
 
-        for episode in range(episode_count):
-            add_noise = episode < int(episode_count * NOISE_OFF_FRACTION)
-            port = _next_port()
+            config = Config(
+                buffer_size=REPLAY_BUFFER_MULTIPLIER * steps_per_ep,
+                batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU,
+                lr_actor=LR_ACTOR, lr_critic=LR_CRITIC,
+                update_every=UPDATE_EVERY,
+            )
+            agent = Agent(
+                HISTORY_LENGTH, action_size=1, config=config,
+                actor_layers=ACTOR_LAYERS, critic_layers=CRITIC_LAYERS,
+            )
 
-            proc = None
-            env = None
-            ep_throughputs = []
-            ep_cws = []
-            ep_fairnesses = []
+            round_throughputs = []
+            round_cws = []
+            round_fairnesses = []
 
-            try:
-                proc = launch_simulation(n_wifi, sim_time, port, dry_run=False)
-                env = connect_env(port)
-                obs = env.reset()
-                obs = preprocess(np.reshape(obs, (-1, 1, 1)))
+            for episode in range(episode_count):
+                add_noise = episode < int(episode_count * NOISE_OFF_FRACTION)
+                port = _next_port()
 
-                last_obs = None
-                for step in range(steps_per_ep):
-                    actions = agent.act(np.array(obs, dtype=np.float32), add_noise)
-                    # Flatten for env.step (ns3gym expects 1D array)
-                    action_flat = np.array([float(actions.flat[0])])
-                    next_obs, reward, done, info = env.step(action_flat)
-                    next_obs = preprocess(np.reshape(next_obs, (-1, 1, 1)))
+                proc = None
+                env = None
+                ep_throughputs = []
+                ep_cws = []
+                ep_fairnesses = []
 
-                    # Train (except on last episode = operational phase)
-                    if (last_obs is not None and step > HISTORY_LENGTH
-                            and episode < episode_count - 1):
-                        agent.step(obs, actions, np.array([reward]),
-                                   next_obs, np.array([done]), 2)
+                try:
+                    proc = launch_simulation(n_wifi, sim_time, port, dry_run=False)
+                    env = connect_env(port)
+                    obs = env.reset()
+                    obs = preprocess(np.reshape(obs, (-1, 1, 1)))
 
-                    if step > HISTORY_LENGTH:
-                        parsed = parse_info(info)
-                        if parsed:
-                            ep_throughputs.append(parsed["throughput_mbps"])
-                            ep_cws.append(parsed["cw"])
-                            ep_fairnesses.append(parsed["fairness"])
+                    last_obs = None
+                    for step in range(steps_per_ep):
+                        actions = agent.act(np.array(obs, dtype=np.float32), add_noise)
+                        action_flat = np.array([float(actions.flat[0])])
+                        next_obs, reward, done, info = env.step(action_flat)
+                        next_obs = preprocess(np.reshape(next_obs, (-1, 1, 1)))
 
-                    last_obs = obs
-                    obs = next_obs
+                        if (last_obs is not None and step > HISTORY_LENGTH
+                                and episode < episode_count - 1):
+                            agent.step(obs, actions, np.array([reward]),
+                                       next_obs, np.array([done]), 2)
 
-                    if done:
-                        break
+                        if step > HISTORY_LENGTH:
+                            parsed = parse_info(info)
+                            if parsed:
+                                ep_throughputs.append(parsed["throughput_mbps"])
+                                ep_cws.append(parsed["cw"])
+                                ep_fairnesses.append(parsed["fairness"])
 
-            except Exception as e:
-                _print(f"    ERROR in round {episode+1}: {e}")
-            finally:
-                cleanup(env, proc)
-                agent.reset()
+                        last_obs = obs
+                        obs = next_obs
 
-            mean_thr = np.mean(ep_throughputs) if ep_throughputs else 0
-            mean_cw = np.mean(ep_cws) if ep_cws else 0
-            mean_fair = np.mean(ep_fairnesses) if ep_fairnesses else 0
-            round_throughputs.append(float(mean_thr))
-            round_cws.append(float(mean_cw))
-            round_fairnesses.append(float(mean_fair))
+                        if done:
+                            break
 
-            noise_str = "NOISE" if add_noise else "NO_NOISE"
-            _print(f"    Round {episode+1}/{episode_count}: "
-                   f"thr={mean_thr:.2f} Mbps, CW={mean_cw:.0f}, "
-                   f"fair={mean_fair:.4f} [{noise_str}]")
+                except Exception as e:
+                    _print(f"    ERROR in round {episode+1}: {e}")
+                finally:
+                    cleanup(env, proc)
+                    agent.reset()
 
-        results[n_wifi] = round_throughputs[-1] if round_throughputs else 0
-        cw_history[n_wifi] = round_cws
-        thr_history[n_wifi] = round_throughputs
-        fair_history[n_wifi] = round_fairnesses
+                mean_thr = np.mean(ep_throughputs) if ep_throughputs else 0
+                mean_cw = np.mean(ep_cws) if ep_cws else 0
+                mean_fair = np.mean(ep_fairnesses) if ep_fairnesses else 0
+                round_throughputs.append(float(mean_thr))
+                round_cws.append(float(mean_cw))
+                round_fairnesses.append(float(mean_fair))
+
+                noise_str = "NOISE" if add_noise else "NO_NOISE"
+                _print(f"    Round {episode+1}/{episode_count}: "
+                       f"thr={mean_thr:.2f} Mbps, CW={mean_cw:.0f}, "
+                       f"fair={mean_fair:.4f} [{noise_str}]")
+
+            results[n_wifi] = round_throughputs[-1] if round_throughputs else 0
+            cw_history[n_wifi] = round_cws
+            thr_history[n_wifi] = round_throughputs
+            fair_history[n_wifi] = round_fairnesses
 
     return results, cw_history, thr_history, fair_history
 
@@ -626,7 +707,7 @@ def main():
     # ------ DDPG Static ------
     if run_all or ddpg_only:
         ddpg_results, cw_hist, thr_hist, fair_hist = run_ddpg_static(
-            station_counts, sim_time, episode_count)
+            station_counts, sim_time, episode_count, max_workers)
         save_results(ddpg_results, f"{prefix}ddpg.json")
         save_results(cw_hist, f"{prefix}ddpg_cw_history.json")
         save_results(thr_hist, f"{prefix}ddpg_thr_history.json")
