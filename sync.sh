@@ -30,9 +30,11 @@ cp "$SCRIPT_DIR/scratch/linear-mesh/preprocessor.py" "$WORK_DIR/"
 cp "$SCRIPT_DIR/scratch/linear-mesh/CW_data.csv" "$WORK_DIR/"
 
 # Copy agents
+mkdir -p "$WORK_DIR/agents/"
 cp -R "$SCRIPT_DIR/scratch/linear-mesh/agents/"* "$WORK_DIR/agents/"
 
 # Copy experiments
+mkdir -p "$WORK_DIR/experiments/"
 cp -R "$SCRIPT_DIR/scratch/linear-mesh/experiments/"* "$WORK_DIR/experiments/"
 
 # Copy opengym module

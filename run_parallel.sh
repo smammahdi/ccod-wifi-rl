@@ -34,6 +34,13 @@ export NS3_DIR="$NS3_ROOT"
 cd "$WORK_DIR"
 mkdir -p "$RESULTS" "$TMP"
 
+# Verify run_single.py exists
+if [ ! -f "$WORK_DIR/experiments/run_single.py" ]; then
+    echo "ERROR: experiments/run_single.py not found in ns-3 tree."
+    echo "Run: git pull && ./sync.sh"
+    exit 1
+fi
+
 # Station counts
 STATIONS_PAPER="5 10 15 20 25 30 35 40 45"
 STATIONS_EXTENDED="5 10 15 20 25 30 35 40 45 60 80 100"
@@ -43,9 +50,8 @@ EPISODES=15
 MODE="${1:-all}"
 DDPG_PARALLEL="${2:-4}"
 
-# Port allocation: start from 8001
+# Port allocation: direct increment, no subshell
 PORT=8000
-next_port() { PORT=$((PORT + 1)); echo $PORT; }
 
 echo "============================================================"
 echo "PARALLEL EXPERIMENT RUNNER"
@@ -63,7 +69,8 @@ run_beb() {
     echo "--- BEB Baseline (parallel) ---"
     local pids=()
     for n in $stations; do
-        local p=$(next_port)
+        PORT=$((PORT + 1))
+        local p=$PORT
         local out="$TMP/beb_${n}.json"
         echo "  Launching BEB n=$n on port $p"
         python -u -m experiments.run_single beb "$n" "$p" "$SIM_TIME" "$out" &
@@ -75,16 +82,17 @@ run_beb() {
     done
     echo "  BEB complete. Aggregating..."
     python -u -c "
-import json, os, glob
+import json, os, glob, sys
 thr, fair = {}, {}
-for f in glob.glob('$TMP/beb_*.json'):
+prefix = '$prefix'
+for f in sorted(glob.glob('$TMP/beb_*.json')):
     n = int(os.path.basename(f).replace('beb_','').replace('.json',''))
     d = json.load(open(f))
     thr[n] = d['throughput']
     fair[n] = d['fairness']
     print(f'  n={n}: thr={d[\"throughput\"]:.2f} Mbps, fair={d[\"fairness\"]:.4f}')
-json.dump(thr, open('$RESULTS/${prefix}beb.json','w'), indent=2)
-json.dump(fair, open('$RESULTS/${prefix}beb_fairness.json','w'), indent=2)
+json.dump(thr, open('$RESULTS/' + prefix + 'beb.json','w'), indent=2)
+json.dump(fair, open('$RESULTS/' + prefix + 'beb_fairness.json','w'), indent=2)
 print(f'  Saved {prefix}beb.json, {prefix}beb_fairness.json')
 "
 }
@@ -98,7 +106,8 @@ run_lookup() {
     echo "--- Lookup Baseline (parallel) ---"
     local pids=()
     for n in $stations; do
-        local p=$(next_port)
+        PORT=$((PORT + 1))
+        local p=$PORT
         local out="$TMP/lookup_${n}.json"
         echo "  Launching Lookup n=$n on port $p"
         python -u -m experiments.run_single lookup "$n" "$p" "$SIM_TIME" "$out" &
@@ -110,16 +119,17 @@ run_lookup() {
     done
     echo "  Lookup complete. Aggregating..."
     python -u -c "
-import json, os, glob
+import json, os, glob, sys
 thr, fair = {}, {}
-for f in glob.glob('$TMP/lookup_*.json'):
+prefix = '$prefix'
+for f in sorted(glob.glob('$TMP/lookup_*.json')):
     n = int(os.path.basename(f).replace('lookup_','').replace('.json',''))
     d = json.load(open(f))
     thr[n] = d['throughput']
     fair[n] = d['fairness']
     print(f'  n={n}: thr={d[\"throughput\"]:.2f} Mbps, fair={d[\"fairness\"]:.4f}')
-json.dump(thr, open('$RESULTS/${prefix}lookup.json','w'), indent=2)
-json.dump(fair, open('$RESULTS/${prefix}lookup_fairness.json','w'), indent=2)
+json.dump(thr, open('$RESULTS/' + prefix + 'lookup.json','w'), indent=2)
+json.dump(fair, open('$RESULTS/' + prefix + 'lookup_fairness.json','w'), indent=2)
 print(f'  Saved {prefix}lookup.json, {prefix}lookup_fairness.json')
 "
 }
@@ -144,11 +154,10 @@ run_ddpg() {
         # Launch new jobs up to max_par
         while [ $idx -lt $total ] && [ $running -lt $max_par ]; do
             local n=${station_arr[$idx]}
-            local p=$(next_port)
+            PORT=$((PORT + 1))
+            local p=$PORT
             # Reserve enough ports for all episodes
-            for i in $(seq 2 $EPISODES); do
-                next_port > /dev/null
-            done
+            PORT=$((PORT + EPISODES))
             local out="$TMP/ddpg_${n}.json"
             echo "  Launching DDPG n=$n (port_base=$p, $EPISODES episodes)"
             python -u -m experiments.run_single ddpg "$n" "$p" "$SIM_TIME" "$EPISODES" "$out" &
@@ -187,6 +196,7 @@ run_ddpg() {
     python -u -c "
 import json, os, glob
 results, cw_hist, thr_hist, fair_hist = {}, {}, {}, {}
+prefix = '$prefix'
 for f in sorted(glob.glob('$TMP/ddpg_*.json')):
     n = int(os.path.basename(f).replace('ddpg_','').replace('.json',''))
     d = json.load(open(f))
@@ -195,10 +205,10 @@ for f in sorted(glob.glob('$TMP/ddpg_*.json')):
     cw_hist[n] = d['cw_history']
     fair_hist[n] = d['fair_history']
     print(f'  n={n}: final_thr={d[\"final_throughput\"]:.2f} Mbps')
-json.dump(results, open('$RESULTS/${prefix}ddpg.json','w'), indent=2)
-json.dump(thr_hist, open('$RESULTS/${prefix}ddpg_thr_history.json','w'), indent=2)
-json.dump(cw_hist, open('$RESULTS/${prefix}ddpg_cw_history.json','w'), indent=2)
-json.dump(fair_hist, open('$RESULTS/${prefix}ddpg_fair_history.json','w'), indent=2)
+json.dump(results, open('$RESULTS/' + prefix + 'ddpg.json','w'), indent=2)
+json.dump(thr_hist, open('$RESULTS/' + prefix + 'ddpg_thr_history.json','w'), indent=2)
+json.dump(cw_hist, open('$RESULTS/' + prefix + 'ddpg_cw_history.json','w'), indent=2)
+json.dump(fair_hist, open('$RESULTS/' + prefix + 'ddpg_fair_history.json','w'), indent=2)
 print(f'  Saved {prefix}ddpg*.json')
 "
 }
