@@ -1,0 +1,16 @@
+--- a/src/wifi/model/phy-entity.cc
++++ b/src/wifi/model/phy-entity.cc
+@@ -506,6 +506,14 @@ PhyEntity::StartReceivePreamble(Ptr<const WifiPpdu> ppdu, RxPowerWattPerChannelB
+         break;
+     case WifiPhyState::IDLE:
++        // Workaround for ns-3.40 race condition: PHY can be IDLE but still
++        // have a stale currentEvent when many stations cause overlapping
++        // receptions.  Properly abort the stale reception before proceeding.
++        if (m_wifiPhy->m_currentEvent)
++        {
++            NS_LOG_DEBUG("IDLE but currentEvent not null -- aborting stale reception");
++            AbortCurrentReception(FRAME_CAPTURE_PACKET_SWITCH);
++        }
+         StartPreambleDetectionPeriod(event);
+         break;
+     case WifiPhyState::SLEEP:
