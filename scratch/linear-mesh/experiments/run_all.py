@@ -27,6 +27,8 @@ import time
 import json
 import subprocess
 import traceback
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -205,7 +207,16 @@ def summarize_episode(data):
 # Experiment 1: BEB Baseline
 # ===================================================================
 
-def run_beb_experiment(station_counts, sim_time):
+def _run_beb_single(n_wifi, sim_time, port):
+    """Run BEB for a single station count. Designed to be called in parallel."""
+    def action_fn(obs, step):
+        return np.array([3.0])
+    data = run_single_episode(n_wifi, sim_time, port, action_fn, dry_run=True)
+    summary = summarize_episode(data)
+    return n_wifi, summary, len(data)
+
+
+def run_beb_experiment(station_counts, sim_time, max_workers=1):
     """Run BEB baseline for each station count.
 
     Returns:
@@ -219,20 +230,29 @@ def run_beb_experiment(station_counts, sim_time):
     throughput_results = {}
     fairness_results = {}
 
-    for n_wifi in station_counts:
-        port = _next_port()
-        _print(f"\n  nWifi={n_wifi}, port={port} ...")
-
-        def action_fn(obs, step):
-            return np.array([3.0])  # Dummy action, ignored in dryRun mode
-
-        data = run_single_episode(n_wifi, sim_time, port, action_fn, dry_run=True)
-        summary = summarize_episode(data)
-
-        throughput_results[n_wifi] = summary["throughput_mbps"]
-        fairness_results[n_wifi] = summary["fairness"]
-        _print(f"  -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
-               f"Fairness: {summary['fairness']:.4f} ({len(data)} samples)")
+    if max_workers > 1:
+        _print(f"  Running {len(station_counts)} station counts in parallel "
+               f"(workers={min(max_workers, len(station_counts))})")
+        # Pre-assign ports
+        jobs = [(n, sim_time, _next_port()) for n in station_counts]
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(station_counts))) as pool:
+            futures = {pool.submit(_run_beb_single, n, st, p): n
+                       for n, st, p in jobs}
+            for future in as_completed(futures):
+                n_wifi, summary, n_samples = future.result()
+                throughput_results[n_wifi] = summary["throughput_mbps"]
+                fairness_results[n_wifi] = summary["fairness"]
+                _print(f"  nWifi={n_wifi} -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
+                       f"Fairness: {summary['fairness']:.4f} ({n_samples} samples)")
+    else:
+        for n_wifi in station_counts:
+            port = _next_port()
+            _print(f"\n  nWifi={n_wifi}, port={port} ...")
+            n_wifi, summary, n_samples = _run_beb_single(n_wifi, sim_time, port)
+            throughput_results[n_wifi] = summary["throughput_mbps"]
+            fairness_results[n_wifi] = summary["fairness"]
+            _print(f"  -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
+                   f"Fairness: {summary['fairness']:.4f} ({n_samples} samples)")
 
     return throughput_results, fairness_results
 
@@ -241,7 +261,16 @@ def run_beb_experiment(station_counts, sim_time):
 # Experiment 2: Lookup Table Baseline
 # ===================================================================
 
-def run_lookup_experiment(station_counts, sim_time):
+def _run_lookup_single(n_wifi, sim_time, port, action_val, target_cw):
+    """Run Lookup for a single station count. Designed for parallel use."""
+    def action_fn(obs, step, a=action_val):
+        return np.array([a])
+    data = run_single_episode(n_wifi, sim_time, port, action_fn, dry_run=False)
+    summary = summarize_episode(data)
+    return n_wifi, summary, target_cw, action_val
+
+
+def run_lookup_experiment(station_counts, sim_time, max_workers=1):
     """Run lookup table baseline: fixed optimal CW per station count.
 
     Returns:
@@ -255,25 +284,38 @@ def run_lookup_experiment(station_counts, sim_time):
     throughput_results = {}
     fairness_results = {}
 
-    for n_wifi in station_counts:
-        target_cw = LOOKUP_TABLE.get(n_wifi, 63)
-        # CW = 2^(a+4) - 1 => a = log2(CW+1) - 4
-        action_val = np.log2(target_cw + 1) - 4
-        action_val = float(np.clip(action_val, 0, 6))
+    if max_workers > 1:
+        _print(f"  Running {len(station_counts)} station counts in parallel "
+               f"(workers={min(max_workers, len(station_counts))})")
+        jobs = []
+        for n_wifi in station_counts:
+            target_cw = LOOKUP_TABLE.get(n_wifi, 63)
+            action_val = float(np.clip(np.log2(target_cw + 1) - 4, 0, 6))
+            port = _next_port()
+            jobs.append((n_wifi, sim_time, port, action_val, target_cw))
 
-        port = _next_port()
-        _print(f"\n  nWifi={n_wifi}, CW={target_cw}, action={action_val:.2f}, port={port} ...")
-
-        def action_fn(obs, step, a=action_val):
-            return np.array([a])
-
-        data = run_single_episode(n_wifi, sim_time, port, action_fn, dry_run=False)
-        summary = summarize_episode(data)
-
-        throughput_results[n_wifi] = summary["throughput_mbps"]
-        fairness_results[n_wifi] = summary["fairness"]
-        _print(f"  -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
-               f"Fairness: {summary['fairness']:.4f}")
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(station_counts))) as pool:
+            futures = {pool.submit(_run_lookup_single, n, st, p, a, cw): n
+                       for n, st, p, a, cw in jobs}
+            for future in as_completed(futures):
+                n_wifi, summary, target_cw, action_val = future.result()
+                throughput_results[n_wifi] = summary["throughput_mbps"]
+                fairness_results[n_wifi] = summary["fairness"]
+                _print(f"  nWifi={n_wifi}, CW={target_cw} -> "
+                       f"Throughput: {summary['throughput_mbps']:.2f} Mbps, "
+                       f"Fairness: {summary['fairness']:.4f}")
+    else:
+        for n_wifi in station_counts:
+            target_cw = LOOKUP_TABLE.get(n_wifi, 63)
+            action_val = np.log2(target_cw + 1) - 4
+            action_val = float(np.clip(action_val, 0, 6))
+            port = _next_port()
+            _print(f"\n  nWifi={n_wifi}, CW={target_cw}, action={action_val:.2f}, port={port} ...")
+            n_wifi, summary, _, _ = _run_lookup_single(n_wifi, sim_time, port, action_val, target_cw)
+            throughput_results[n_wifi] = summary["throughput_mbps"]
+            fairness_results[n_wifi] = summary["fairness"]
+            _print(f"  -> Throughput: {summary['throughput_mbps']:.2f} Mbps, "
+                   f"Fairness: {summary['fairness']:.4f}")
 
     return throughput_results, fairness_results
 
@@ -529,6 +571,19 @@ def main():
     conv_only = "--conv-only" in sys.argv
     extended = "--extended" in sys.argv
 
+    # Parallel workers: --parallel N (default 1 = sequential)
+    max_workers = 1
+    for arg in sys.argv:
+        if arg.startswith("--parallel"):
+            if "=" in arg:
+                max_workers = int(arg.split("=")[1])
+            else:
+                idx = sys.argv.index(arg)
+                if idx + 1 < len(sys.argv):
+                    max_workers = int(sys.argv[idx + 1])
+    if max_workers < 1:
+        max_workers = 1
+
     if quick:
         station_counts = QUICK_STATION_COUNTS
         sim_time = QUICK_SIM_TIME
@@ -546,6 +601,8 @@ def main():
 
     _print(f"Station counts: {station_counts}")
     _print(f"Simulation time: {sim_time}s, Episodes: {episode_count}")
+    if max_workers > 1:
+        _print(f"Parallel workers: {max_workers}")
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
@@ -556,13 +613,13 @@ def main():
 
     # ------ BEB Baseline ------
     if run_all or beb_only:
-        beb_thr, beb_fair = run_beb_experiment(station_counts, sim_time)
+        beb_thr, beb_fair = run_beb_experiment(station_counts, sim_time, max_workers)
         save_results(beb_thr, f"{prefix}beb.json")
         save_results(beb_fair, f"{prefix}beb_fairness.json")
 
     # ------ Lookup Table Baseline ------
     if run_all or beb_only:
-        lookup_thr, lookup_fair = run_lookup_experiment(station_counts, sim_time)
+        lookup_thr, lookup_fair = run_lookup_experiment(station_counts, sim_time, max_workers)
         save_results(lookup_thr, f"{prefix}lookup.json")
         save_results(lookup_fair, f"{prefix}lookup_fairness.json")
 

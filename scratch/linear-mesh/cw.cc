@@ -98,21 +98,22 @@ double jain_index(void)
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
     std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
 
-    double nominator;
-    double denominator;
-    double n=0;
+    double nominator = 0.0;
+    double denominator = 0.0;
+    double n = 0;
     double station_id = 0;
     for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin(); i != stats.end(); ++i)
     {
         flowThr = i->second.rxBytes;
         flowThr /= wifiScenario->getStationUptime(station_id, current_time);
-        if(flowThr>0){
+        if(flowThr > 0){
             nominator += flowThr;
             denominator += flowThr*flowThr;
             n++;
         }
         station_id++;
     }
+    if(n == 0 || denominator == 0) return 1.0;
     nominator *= nominator;
     denominator *= n;
     return nominator/denominator;

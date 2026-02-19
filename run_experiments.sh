@@ -67,11 +67,19 @@ echo ""
 MODE="${1:-all}"
 EXTRA="${2:-}"
 
+# Auto-detect parallelism: use half of available cores (each ns-3 sim is single-threaded)
+NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+PARALLEL=$((NPROC / 2))
+if [ "$PARALLEL" -lt 1 ]; then PARALLEL=1; fi
+
+# Ensure results directory exists for tee
+mkdir -p "$WORK_DIR/results"
+
 case "$MODE" in
     quick)
         echo "Mode: QUICK (pipeline test)"
         echo ""
-        python -u -m experiments.run_all --quick 2>&1 | tee results/experiment_quick_log.txt
+        python -u -m experiments.run_all --quick --parallel="$PARALLEL" 2>&1 | tee results/experiment_quick_log.txt
         echo ""
         echo "Generating plots..."
         python -m experiments.plot_results
@@ -79,7 +87,7 @@ case "$MODE" in
     beb)
         echo "Mode: BEB + Lookup baselines"
         echo ""
-        python -u -m experiments.run_all --beb-only 2>&1 | tee results/experiment_beb_log.txt
+        python -u -m experiments.run_all --beb-only --parallel="$PARALLEL" 2>&1 | tee results/experiment_beb_log.txt
         ;;
     ddpg)
         echo "Mode: DDPG training"
@@ -94,7 +102,7 @@ case "$MODE" in
     extended)
         echo "Mode: Extended experiments (up to 100 stations)"
         echo ""
-        python -u -m experiments.run_all --extended 2>&1 | tee results/experiment_extended_log.txt
+        python -u -m experiments.run_all --extended --parallel="$PARALLEL" 2>&1 | tee results/experiment_extended_log.txt
         echo ""
         echo "Generating extended plots..."
         python -m experiments.plot_results --extended
@@ -109,9 +117,9 @@ case "$MODE" in
         fi
         ;;
     all)
-        echo "Mode: FULL paper experiments"
+        echo "Mode: FULL paper experiments (parallel=$PARALLEL)"
         echo ""
-        python -u -m experiments.run_all 2>&1 | tee results/experiment_full_log.txt
+        python -u -m experiments.run_all --parallel="$PARALLEL" 2>&1 | tee results/experiment_full_log.txt
         echo ""
         echo "Generating plots..."
         python -m experiments.plot_results
