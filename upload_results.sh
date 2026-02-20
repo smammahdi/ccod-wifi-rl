@@ -23,74 +23,37 @@ zip -r "$ZIPFILE" results/
 echo "Created: $ZIPFILE ($(du -h "$ZIPFILE" | cut -f1))"
 
 echo ""
-echo "Uploading via Python..."
-python3 -c "
-import urllib.request, json, sys, os
+echo "Uploading to temp.sh (files expire in 3 days)..."
 
+# Prefer curl if available, else use Python urllib
+if command -v curl &>/dev/null; then
+    URL=$(curl -s -F "file=@$ZIPFILE" https://temp.sh/upload)
+else
+    URL=$(python3 -c "
+import urllib.request, os
 filepath = '$ZIPFILE'
-filename = os.path.basename(filepath)
+fn = os.path.basename(filepath)
+body = b'------Py\r\nContent-Disposition: form-data; name=\"file\"; filename=\"' + fn.encode() + b'\"\r\nContent-Type: application/zip\r\n\r\n'
+with open(filepath, 'rb') as f: body += f.read()
+body += b'\r\n------Py--\r\n'
+req = urllib.request.Request('https://temp.sh/upload', data=body, headers={'Content-Type': 'multipart/form-data; boundary=----Py'})
+resp = urllib.request.urlopen(req, timeout=120)
+print(resp.read().decode().strip())
+")
+fi
 
-# Try file.io
-try:
-    import subprocess
-    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-    body = b''
-    body += ('--' + boundary + '\r\n').encode()
-    body += ('Content-Disposition: form-data; name=\"file\"; filename=\"' + filename + '\"\r\n').encode()
-    body += b'Content-Type: application/zip\r\n\r\n'
-    with open(filepath, 'rb') as f:
-        body += f.read()
-    body += ('\r\n--' + boundary + '--\r\n').encode()
-
-    req = urllib.request.Request(
-        'https://file.io/?expires=1d',
-        data=body,
-        headers={'Content-Type': 'multipart/form-data; boundary=' + boundary}
-    )
-    resp = urllib.request.urlopen(req, timeout=120)
-    data = json.loads(resp.read())
-    url = data.get('link', '')
-    if url:
-        print(f'\n==========================================')
-        print(f'DOWNLOAD URL (expires 24h, single use):')
-        print(url)
-        print(f'==========================================')
-        sys.exit(0)
-except Exception as e:
-    print(f'file.io failed: {e}')
-
-# Try 0x0.st
-try:
-    boundary = '----Boundary0x0'
-    body = b''
-    body += ('--' + boundary + '\r\n').encode()
-    body += ('Content-Disposition: form-data; name=\"file\"; filename=\"' + filename + '\"\r\n').encode()
-    body += b'Content-Type: application/zip\r\n\r\n'
-    with open(filepath, 'rb') as f:
-        body += f.read()
-    body += ('\r\n--' + boundary + '--\r\n').encode()
-
-    req = urllib.request.Request(
-        'https://0x0.st',
-        data=body,
-        headers={'Content-Type': 'multipart/form-data; boundary=' + boundary}
-    )
-    resp = urllib.request.urlopen(req, timeout=120)
-    url = resp.read().decode().strip()
-    if url.startswith('http'):
-        print(f'\n==========================================')
-        print(f'DOWNLOAD URL:')
-        print(url)
-        print(f'==========================================')
-        sys.exit(0)
-except Exception as e:
-    print(f'0x0.st failed: {e}')
-
-print('All upload methods failed.')
-print(f'Zip file at: {filepath}')
-print('Install curl: sudo apt install curl')
-print('Or start HTTP server: cd /tmp && python3 -m http.server 9999')
-sys.exit(1)
-"
+if [ -n "$URL" ] && echo "$URL" | grep -q "^http"; then
+    echo ""
+    echo "=========================================="
+    echo "DOWNLOAD URL (expires in 3 days):"
+    echo "$URL"
+    echo "=========================================="
+    echo ""
+    echo "On local machine:"
+    echo "  curl -L '$URL' -o /tmp/ccod_results.zip && unzip -o /tmp/ccod_results.zip -d '$(pwd)/'"
+else
+    echo "Upload failed. Response: $URL"
+    echo "Zip file at: $ZIPFILE"
+fi
 
 echo "Zip remains at: $ZIPFILE"
