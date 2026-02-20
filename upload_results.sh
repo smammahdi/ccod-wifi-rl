@@ -23,42 +23,74 @@ zip -r "$ZIPFILE" results/
 echo "Created: $ZIPFILE ($(du -h "$ZIPFILE" | cut -f1))"
 
 echo ""
-echo "Uploading to file.io..."
-RESPONSE=$(curl -s -F "file=@$ZIPFILE" https://file.io/?expires=1d)
-URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('link','FAILED'))" 2>/dev/null || echo "")
+echo "Uploading via Python..."
+python3 -c "
+import urllib.request, json, sys, os
 
-if [ -n "$URL" ] && [ "$URL" != "FAILED" ]; then
-    echo ""
-    echo "=========================================="
-    echo "DOWNLOAD URL (expires in 24h, one-time):"
-    echo "$URL"
-    echo "=========================================="
-    echo ""
-    echo "On local machine run:"
-    echo "  curl -L '$URL' -o /tmp/ccod_results.zip && unzip -o /tmp/ccod_results.zip -d '$SCRIPT_DIR/'"
-else
-    echo "file.io failed. Trying transfer.sh..."
-    URL2=$(curl --upload-file "$ZIPFILE" "https://transfer.sh/ccod_results.zip" 2>/dev/null || echo "")
-    if [ -n "$URL2" ]; then
-        echo ""
-        echo "=========================================="
-        echo "DOWNLOAD URL (expires in 14 days):"
-        echo "$URL2"
-        echo "=========================================="
-        echo ""
-        echo "On local machine run:"
-        echo "  curl -L '$URL2' -o /tmp/ccod_results.zip && unzip -o /tmp/ccod_results.zip -d '$SCRIPT_DIR/'"
-    else
-        echo ""
-        echo "Both uploads failed. Manual transfer needed."
-        echo "Zip file is at: $ZIPFILE"
-        echo "Size: $(du -h "$ZIPFILE" | cut -f1)"
-        echo ""
-        echo "Option: Start a simple HTTP server on the remote:"
-        echo "  cd /tmp && python3 -m http.server 9999"
-        echo "Then on local (replace REMOTE_IP):"
-        echo "  curl http://REMOTE_IP:9999/$(basename $ZIPFILE) -o /tmp/ccod_results.zip"
-    fi
-fi
+filepath = '$ZIPFILE'
+filename = os.path.basename(filepath)
 
-rm -f "$ZIPFILE"
+# Try file.io
+try:
+    import subprocess
+    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+    body = b''
+    body += ('--' + boundary + '\r\n').encode()
+    body += ('Content-Disposition: form-data; name=\"file\"; filename=\"' + filename + '\"\r\n').encode()
+    body += b'Content-Type: application/zip\r\n\r\n'
+    with open(filepath, 'rb') as f:
+        body += f.read()
+    body += ('\r\n--' + boundary + '--\r\n').encode()
+
+    req = urllib.request.Request(
+        'https://file.io/?expires=1d',
+        data=body,
+        headers={'Content-Type': 'multipart/form-data; boundary=' + boundary}
+    )
+    resp = urllib.request.urlopen(req, timeout=120)
+    data = json.loads(resp.read())
+    url = data.get('link', '')
+    if url:
+        print(f'\n==========================================')
+        print(f'DOWNLOAD URL (expires 24h, single use):')
+        print(url)
+        print(f'==========================================')
+        sys.exit(0)
+except Exception as e:
+    print(f'file.io failed: {e}')
+
+# Try 0x0.st
+try:
+    boundary = '----Boundary0x0'
+    body = b''
+    body += ('--' + boundary + '\r\n').encode()
+    body += ('Content-Disposition: form-data; name=\"file\"; filename=\"' + filename + '\"\r\n').encode()
+    body += b'Content-Type: application/zip\r\n\r\n'
+    with open(filepath, 'rb') as f:
+        body += f.read()
+    body += ('\r\n--' + boundary + '--\r\n').encode()
+
+    req = urllib.request.Request(
+        'https://0x0.st',
+        data=body,
+        headers={'Content-Type': 'multipart/form-data; boundary=' + boundary}
+    )
+    resp = urllib.request.urlopen(req, timeout=120)
+    url = resp.read().decode().strip()
+    if url.startswith('http'):
+        print(f'\n==========================================')
+        print(f'DOWNLOAD URL:')
+        print(url)
+        print(f'==========================================')
+        sys.exit(0)
+except Exception as e:
+    print(f'0x0.st failed: {e}')
+
+print('All upload methods failed.')
+print(f'Zip file at: {filepath}')
+print('Install curl: sudo apt install curl')
+print('Or start HTTP server: cd /tmp && python3 -m http.server 9999')
+sys.exit(1)
+"
+
+echo "Zip remains at: $ZIPFILE"
